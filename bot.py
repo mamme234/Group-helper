@@ -4,23 +4,42 @@ from typing import Dict, Set
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ChatPermissions
+from aiohttp import web  # Add this for health check
+import os
 
 # --- CONFIGURATION ---
-TOKEN = "8940641575:AAHhPd8vgjTsClwZZMgte1LoX1lP-xiXfcA"
-REACTION_EMOJI = "👍"  # Change to any emoji: ❤️, 🔥, 🎉, etc.
-VERIFICATION_TIME_MINUTES = 10  # Time to react before being muted
+TOKEN = os.getenv("BOT_TOKEN", "8940641575:AAHhPd8vgjTsClwZZMgte1LoX1lP-xiXfcA")  # Use environment variable!
+REACTION_EMOJI = "👍"
+VERIFICATION_TIME_MINUTES = 10
 
-# --- DATABASE (in-memory, use Redis/DB for production) ---
-pending_users: Dict[int, Set[int]] = {}  # {chat_id: set(user_ids)}
-verified_users: Dict[int, Set[int]] = {}  # {chat_id: set(user_ids)}
+# --- DATABASE (in-memory) ---
+pending_users: Dict[int, Set[int]] = {}
+verified_users: Dict[int, Set[int]] = {}
 
 # --- SETUP ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# --- HEALTH CHECK SERVER (keeps Render happy) ---
+app = web.Application()
+
+async def health_check(request):
+    return web.Response(text="Bot is running!", status=200)
+
+app.router.add_get('/', health_check)
+app.router.add_get('/health', health_check)
+
+async def run_health_server():
+    """Run a simple HTTP server for health checks"""
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"✅ Health check server running on port {port}")
+
 # --- HELPER FUNCTIONS ---
 async def restrict_user(chat_id: int, user_id: int):
-    """Mute a user who didn't react"""
     permissions = ChatPermissions(
         can_send_messages=False,
         can_send_media_messages=False,
@@ -30,7 +49,6 @@ async def restrict_user(chat_id: int, user_id: int):
     await bot.restrict_chat_member(chat_id, user_id, permissions)
     
 async def unrestrict_user(chat_id: int, user_id: int):
-    """Remove all restrictions after reaction"""
     permissions = ChatPermissions(
         can_send_messages=True,
         can_send_media_messages=True,
@@ -40,69 +58,58 @@ async def unrestrict_user(chat_id: int, user_id: int):
     await bot.restrict_chat_member(chat_id, user_id, permissions)
 
 async def send_verification_message(chat_id: int, user_id: int):
-    """Send a message asking for reaction"""
     user = await bot.get_chat_member(chat_id, user_id)
     message = await bot.send_message(
         chat_id,
-        f"⚠️ {user.user.first_name}, please react with {REACTION_EMOJI} to this message within {VERIFICATION_TIME_MINUTES} minutes to verify you're human!\n\n"
-        f"👉 Just tap and hold the message, then select {REACTION_EMOJI}",
-        reply_to_message_id=None
+        f"⚠️ {user.user.first_name}, please react with {REACTION_EMOJI} to this message within {VERIFICATION_TIME_MINUTES} minutes to verify!\n\n"
+        f"👉 Tap and hold the message, then select {REACTION_EMOJI}",
     )
     
-    # Store pending user
     if chat_id not in pending_users:
         pending_users[chat_id] = set()
     pending_users[chat_id].add(user_id)
     
-    # Auto-mute after timeout
-    asyncio.create_task(auto_mute_after_timeout(chat_id, user_id, message.message_id))
+    asyncio.create_task(auto_mute_after_timeout(chat_id, user_id))
 
-async def auto_mute_after_timeout(chat_id: int, user_id: int, message_id: int):
-    """Wait for timeout, then mute if no reaction"""
+async def auto_mute_after_timeout(chat_id: int, user_id: int):
     await asyncio.sleep(VERIFICATION_TIME_MINUTES * 60)
     
-    # Check if user is still pending (not verified)
     if chat_id in pending_users and user_id in pending_users[chat_id]:
         await restrict_user(chat_id, user_id)
-        
-        # Notify group
         user = await bot.get_chat_member(chat_id, user_id)
         await bot.send_message(
             chat_id,
-            f"🔇 {user.user.first_name} was muted for not verifying within {VERIFICATION_TIME_MINUTES} minutes.\n"
-            f"Send me a DM to verify and get unmuted!"
+            f"🔇 {user.user.first_name} was muted for not verifying.\n"
+            f"Send /verify (reply to their message) to unmute."
         )
         
-        # Clean up
-        if chat_id in pending_users and user_id in pending_users[chat_id]:
+        if chat_id in pending_users:
             pending_users[chat_id].discard(user_id)
 
-# --- MESSAGE HANDLER: Catch messages from non-verified users ---
+# --- MESSAGE HANDLER ---
 @dp.message()
 async def check_verification(message: types.Message):
-    # Only check group/supergroup messages
     if message.chat.type not in ["group", "supergroup"]:
         return
     
     chat_id = message.chat.id
     user_id = message.from_user.id
     
-    # Skip admins (they don't need verification)
-    chat_member = await bot.get_chat_member(chat_id, user_id)
-    if chat_member.status in ["creator", "administrator"]:
+    try:
+        chat_member = await bot.get_chat_member(chat_id, user_id)
+        if chat_member.status in ["creator", "administrator"]:
+            return
+    except:
         return
     
-    # Check if user is verified
     is_verified = (
         chat_id in verified_users and 
         user_id in verified_users[chat_id]
     )
     
-    # If not verified, delete message and send reminder
     if not is_verified:
         await message.delete()
         
-        # Check if user is already pending
         is_pending = (
             chat_id in pending_users and 
             user_id in pending_users[chat_id]
@@ -111,41 +118,36 @@ async def check_verification(message: types.Message):
         if not is_pending:
             await send_verification_message(chat_id, user_id)
         else:
-            # Send ephemeral reminder (will auto-delete)
             reminder = await message.answer(
-                f"⚠️ {message.from_user.first_name}, please verify first by reacting with {REACTION_EMOJI} to the verification message!",
-                reply_to_message_id=message.message_id
+                f"⚠️ {message.from_user.first_name}, please verify first!"
             )
             await asyncio.sleep(5)
             await reminder.delete()
 
-# --- REACTION HANDLER: Catch when user reacts ---
+# --- REACTION HANDLER ---
 @dp.message_reaction()
 async def handle_reaction(reaction_event: types.MessageReactionUpdated):
-    # Check if the reacted message was sent by the bot
     if reaction_event.old_reaction == reaction_event.new_reaction:
-        return  # No change
+        return
         
     chat_id = reaction_event.chat.id
     user_id = reaction_event.user.id
-    message_id = reaction_event.message_id
     
-    # Skip admins
-    chat_member = await bot.get_chat_member(chat_id, user_id)
-    if chat_member.status in ["creator", "administrator"]:
-        return
-    
-    # Get the message
     try:
-        message = await bot.get_message(chat_id, message_id)
+        chat_member = await bot.get_chat_member(chat_id, user_id)
+        if chat_member.status in ["creator", "administrator"]:
+            return
     except:
         return
     
-    # Check if message was sent by the bot (our verification message)
+    try:
+        message = await bot.get_message(chat_id, reaction_event.message_id)
+    except:
+        return
+    
     if message.from_user.id != bot.id:
         return
     
-    # Check if user has the required reaction
     has_reaction = False
     for reaction in reaction_event.new_reaction:
         if reaction.emoji == REACTION_EMOJI:
@@ -153,76 +155,63 @@ async def handle_reaction(reaction_event: types.MessageReactionUpdated):
             break
     
     if has_reaction:
-        # Verify the user
         if chat_id not in verified_users:
             verified_users[chat_id] = set()
         verified_users[chat_id].add(user_id)
         
-        # Remove from pending
         if chat_id in pending_users:
             pending_users[chat_id].discard(user_id)
         
-        # Unmute user if they were muted
         await unrestrict_user(chat_id, user_id)
         
-        # Confirmation message
         await bot.send_message(
             chat_id,
-            f"✅ {message.from_user.first_name} has been verified! Welcome to the group! 🎉",
-            reply_to_message_id=message_id
+            f"✅ {message.from_user.first_name} has been verified! Welcome!"
         )
         
-        # Delete verification message after 5 seconds
         await asyncio.sleep(5)
         await message.delete()
 
-# --- COMMAND: Manually verify someone (admin only) ---
+# --- COMMANDS ---
 @dp.message(Command("verify"))
 async def manual_verify(message: types.Message):
     if message.chat.type not in ["group", "supergroup"]:
+        await message.answer("This command only works in groups!")
         return
     
-    # Check admin status
-    chat_member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if chat_member.status not in ["creator", "administrator"]:
-        await message.answer("❌ Only admins can use this command!")
+    try:
+        chat_member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+        if chat_member.status not in ["creator", "administrator"]:
+            await message.answer("❌ Only admins can use this command!")
+            return
+    except:
         return
     
-    # Get user to verify (reply to a message or mention)
-    user_id = None
-    if message.reply_to_message:
-        user_id = message.reply_to_message.from_user.id
-    elif len(message.text.split()) > 1:
-        # Try to parse mention or ID
-        target = message.text.split()[1]
-        if target.startswith("@"):
-            # Get user by username (simplified)
-            pass  # Would need more complex logic
-        elif target.isdigit():
-            user_id = int(target)
-    
-    if not user_id:
-        await message.answer("Usage: /verify (reply to a user's message) or /verify [user_id]")
+    if not message.reply_to_message:
+        await message.answer("❌ Reply to a user's message to verify them!\nUsage: /verify (reply to message)")
         return
     
-    # Verify the user
+    user_id = message.reply_to_message.from_user.id
     chat_id = message.chat.id
+    
     if chat_id not in verified_users:
         verified_users[chat_id] = set()
     verified_users[chat_id].add(user_id)
     
     await unrestrict_user(chat_id, user_id)
-    await message.answer(f"✅ User has been manually verified and unmuted!")
+    await message.answer(f"✅ User verified and unmuted!")
 
-# --- COMMAND: Reset all verifications ---
-@dp.message(Command("reset_verifications"))
+@dp.message(Command("reset"))
 async def reset_all(message: types.Message):
     if message.chat.type not in ["group", "supergroup"]:
         return
     
-    chat_member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if chat_member.status not in ["creator", "administrator"]:
-        await message.answer("❌ Only admins can use this command!")
+    try:
+        chat_member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+        if chat_member.status not in ["creator", "administrator"]:
+            await message.answer("❌ Only admins can use this command!")
+            return
+    except:
         return
     
     chat_id = message.chat.id
@@ -231,13 +220,36 @@ async def reset_all(message: types.Message):
     if chat_id in pending_users:
         pending_users[chat_id].clear()
     
-    await message.answer("🔄 All verifications have been reset! New members will need to verify again.")
+    await message.answer("🔄 All verifications reset!")
+
+@dp.message(Command("stats"))
+async def show_stats(message: types.Message):
+    if message.chat.type not in ["group", "supergroup"]:
+        return
+    
+    chat_id = message.chat.id
+    verified_count = len(verified_users.get(chat_id, set()))
+    pending_count = len(pending_users.get(chat_id, set()))
+    
+    await message.answer(
+        f"📊 **Group Statistics**\n"
+        f"✅ Verified users: {verified_count}\n"
+        f"⏳ Pending users: {pending_count}\n"
+        f"🎯 Required reaction: {REACTION_EMOJI}\n"
+        f"⏱️ Timeout: {VERIFICATION_TIME_MINUTES} minutes",
+        parse_mode="Markdown"
+    )
 
 # --- START BOT ---
 async def main():
-    print("🤖 Reaction Verification Bot started!")
+    print("🤖 Reaction Verification Bot starting...")
     print(f"Required reaction: {REACTION_EMOJI}")
     print(f"Timeout: {VERIFICATION_TIME_MINUTES} minutes")
+    
+    # Start health check server
+    await run_health_server()
+    
+    # Start bot polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
