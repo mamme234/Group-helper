@@ -8,11 +8,15 @@ from typing import Dict, Set, List, Optional
 from collections import defaultdict
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
+from aiogram.enums import ParseMode
 import os
 
 # ==================== CONFIGURATION ====================
-TOKEN = os.getenv("BOT_TOKEN", "8940641575:AAHhPd8vgjTsClwZZMgte1LoX1lP-xiXfcA")
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is not set!")
+
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID", None)  # Channel ID for logs
 FORCE_CHANNEL_ID = os.getenv("FORCE_CHANNEL_ID", None)  # Channel users must join
 RULES_CHANNEL_ID = os.getenv("RULES_CHANNEL_ID", None)  # Channel with rules
@@ -47,6 +51,10 @@ CHANNEL_PATTERNS = [
     r'@[a-zA-Z0-9_]{5,}',
 ]
 
+# Initialize bot and dispatcher - THIS IS CRITICAL!
+bot = Bot(token=TOKEN)
+dp = Dispatcher()  # <-- YOU WERE MISSING THIS!
+
 # ==================== DATA STORAGE ====================
 user_message_times: Dict[int, List[datetime]] = {}
 user_warnings: Dict[str, int] = {}
@@ -62,7 +70,7 @@ group_settings: Dict[int, Dict[str, bool]] = {}
 def get_user_key(chat_id: int, user_id: int) -> str:
     return f"{chat_id}_{user_id}"
 
-async def is_admin(chat_id: int, user_id: int) -> bool:
+async def is_admin(chat_id: int, user_id: int, bot: Bot) -> bool:
     try:
         chat_member = await bot.get_chat_member(chat_id, user_id)
         return chat_member.status in ["creator", "administrator"]
@@ -88,7 +96,7 @@ async def log_action(chat_id: int, action: str, user_id: int, admin_id: int = No
             log_text += f"**Reason:** {reason}\n"
         log_text += f"**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
-        await bot.send_message(LOG_CHANNEL_ID, log_text, parse_mode="Markdown")
+        await bot.send_message(LOG_CHANNEL_ID, log_text, parse_mode=ParseMode.MARKDOWN)
     except:
         pass
 
@@ -160,7 +168,7 @@ async def warn_user(chat_id: int, user_id: int, reason: str, admin_id: int = Non
         f"User: {user_id}\n"
         f"Reason: {reason}\n"
         f"{'🔇 User has been muted!' if current_warns >= WARN_LIMIT else 'Be careful!'}",
-        parse_mode="Markdown"
+        parse_mode=ParseMode.MARKDOWN
     )
     
     # Mute if reached limit
@@ -210,7 +218,7 @@ async def send_captcha(chat_id: int, user_id: int, user_name: str):
         f"Please solve this CAPTCHA within 2 minutes:\n\n"
         f"**{question}**\n\n"
         f"Type only the number in the chat.",
-        parse_mode="Markdown",
+        parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
     
@@ -252,7 +260,7 @@ async def send_force_join_message(chat_id: int, user_id: int, user_name: str):
         chat_id,
         f"⚠️ **{user_name}**, you must join our channel before participating!\n\n"
         f"Click the button below, join, then click 'Checked'.",
-        parse_mode="Markdown",
+        parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
 
@@ -329,7 +337,7 @@ async def send_welcome(chat_id: int, user_id: int, user_name: str):
         [InlineKeyboardButton(text="✅ Got it!", callback_data=f"welcome_done_{user_id}")]
     ])
     
-    await bot.send_message(chat_id, welcome_text, parse_mode="Markdown", reply_markup=keyboard)
+    await bot.send_message(chat_id, welcome_text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     
     # Track join time
     key = get_user_key(chat_id, user_id)
@@ -361,7 +369,7 @@ async def start_cmd(message: types.Message):
         "/rules - View group rules\n"
         "/stats - Group statistics\n\n"
         "Add me as admin to start protecting your group!",
-        parse_mode="Markdown"
+        parse_mode=ParseMode.MARKDOWN
     )
 
 @dp.message(Command("help"))
@@ -388,7 +396,7 @@ async def help_cmd(message: types.Message):
         "/settings - Configure bot\n"
         "/logs - Recent moderation log"
     )
-    await message.answer(help_text, parse_mode="Markdown")
+    await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
 
 @dp.message(Command("rules"))
 async def rules_cmd(message: types.Message):
@@ -406,12 +414,12 @@ async def rules_cmd(message: types.Message):
         "• Repeated violations = Ban\n\n"
         "✅ **To appeal:** Contact an admin"
     )
-    await message.answer(rules, parse_mode="Markdown")
+    await message.answer(rules, parse_mode=ParseMode.MARKDOWN)
 
 # --- Moderation Commands ---
 @dp.message(Command("warn"))
 async def warn_cmd(message: types.Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await is_admin(message.chat.id, message.from_user.id, bot):
         await message.answer("❌ Only admins can use this command!")
         return
     
@@ -426,7 +434,7 @@ async def warn_cmd(message: types.Message):
 
 @dp.message(Command("mute"))
 async def mute_cmd(message: types.Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await is_admin(message.chat.id, message.from_user.id, bot):
         await message.answer("❌ Only admins can use this command!")
         return
     
@@ -448,7 +456,7 @@ async def mute_cmd(message: types.Message):
 
 @dp.message(Command("unmute"))
 async def unmute_cmd(message: types.Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await is_admin(message.chat.id, message.from_user.id, bot):
         await message.answer("❌ Only admins can use this command!")
         return
     
@@ -468,7 +476,7 @@ async def unmute_cmd(message: types.Message):
 
 @dp.message(Command("kick"))
 async def kick_cmd(message: types.Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await is_admin(message.chat.id, message.from_user.id, bot):
         await message.answer("❌ Only admins can use this command!")
         return
     
@@ -484,7 +492,7 @@ async def kick_cmd(message: types.Message):
 
 @dp.message(Command("ban"))
 async def ban_cmd(message: types.Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await is_admin(message.chat.id, message.from_user.id, bot):
         await message.answer("❌ Only admins can use this command!")
         return
     
@@ -500,7 +508,7 @@ async def ban_cmd(message: types.Message):
 
 @dp.message(Command("clear"))
 async def clear_cmd(message: types.Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await is_admin(message.chat.id, message.from_user.id, bot):
         await message.answer("❌ Only admins can use this command!")
         return
     
@@ -508,11 +516,20 @@ async def clear_cmd(message: types.Message):
     count = int(args[1]) if len(args) > 1 and args[1].isdigit() else 10
     count = min(count, 100)
     
-    deleted = await bot.delete_messages(
-        message.chat.id,
-        [msg.message_id for msg in (await message.chat.get_messages(offset=1, limit=count))]
-    )
-    await message.answer(f"🧹 Deleted {count} messages!")
+    # Delete command message
+    await message.delete()
+    
+    # Delete last N messages
+    deleted = 0
+    async for msg in message.chat.history(limit=count + 1):
+        if msg.message_id != message.message_id:
+            try:
+                await msg.delete()
+                deleted += 1
+            except:
+                pass
+    
+    await message.answer(f"🧹 Deleted {deleted} messages!", delete_in_after=5)
 
 # --- Info Commands ---
 @dp.message(Command("stats"))
@@ -529,7 +546,7 @@ async def stats_cmd(message: types.Message):
         f"⚙️ Warning limit: {WARN_LIMIT}\n"
         f"🔇 Mute duration: {MUTE_DURATION} min\n"
         f"🚫 Flood limit: {FLOOD_LIMIT} msg/{FLOOD_WINDOW}s",
-        parse_mode="Markdown"
+        parse_mode=ParseMode.MARKDOWN
     )
 
 @dp.message(Command("report"))
@@ -562,7 +579,7 @@ async def rep_cmd(message: types.Message):
 # --- Settings Command ---
 @dp.message(Command("settings"))
 async def settings_cmd(message: types.Message):
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await is_admin(message.chat.id, message.from_user.id, bot):
         await message.answer("❌ Only admins can use this command!")
         return
     
@@ -584,7 +601,7 @@ async def settings_cmd(message: types.Message):
         f"Anti-Links: {'✅' if ENABLE_ANTI_LINKS else '❌'}\n"
         f"Anti-Channels: {'✅' if ENABLE_ANTI_CHANNELS else '❌'}\n\n"
         f"Click buttons to toggle features.",
-        parse_mode="Markdown",
+        parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
 
@@ -603,7 +620,7 @@ async def handle_message(message: types.Message):
         return
     
     # Check admin status
-    if await is_admin(chat_id, user_id):
+    if await is_admin(chat_id, user_id, bot):
         return
     
     # Check force join
@@ -648,37 +665,37 @@ async def handle_message(message: types.Message):
         return
     
     # Bad words filter
-    if ENABLE_BAD_WORDS and contains_bad_words(message.text or ""):
+    if ENABLE_BAD_WORDS and message.text and contains_bad_words(message.text):
         await warn_user(chat_id, user_id, "Bad words are not allowed", None)
         await message.delete()
         return
     
     # NSFW filter
-    if ENABLE_ANTI_NSFW and contains_nsfw(message.text or ""):
+    if ENABLE_ANTI_NSFW and message.text and contains_nsfw(message.text):
         await warn_user(chat_id, user_id, "NSFW content is prohibited", None)
         await message.delete()
         return
     
     # Anti-links
-    if ENABLE_ANTI_LINKS and contains_link(message.text or ""):
+    if ENABLE_ANTI_LINKS and message.text and contains_link(message.text):
         await warn_user(chat_id, user_id, "Links are not allowed", None)
         await message.delete()
         return
     
     # Anti-channels
-    if ENABLE_ANTI_CHANNELS and contains_channel_invite(message.text or ""):
+    if ENABLE_ANTI_CHANNELS and message.text and contains_channel_invite(message.text):
         await warn_user(chat_id, user_id, "Channel invites are not allowed", None)
         await message.delete()
         return
 
 # ==================== CHAT MEMBER HANDLER ====================
 @dp.chat_member()
-async def handle_new_members(update: types.ChatMemberUpdated):
+async def handle_new_members(chat_member_update: types.ChatMemberUpdated):
     """Handle new members joining"""
-    if update.new_chat_member.status == "member":
+    if chat_member_update.new_chat_member.status == "member":
         if ENABLE_WELCOME:
-            user = update.new_chat_member.user
-            await send_welcome(update.chat.id, user.id, user.first_name)
+            user = chat_member_update.new_chat_member.user
+            await send_welcome(chat_member_update.chat.id, user.id, user.first_name)
 
 # ==================== CALLBACK HANDLER ====================
 @dp.callback_query()
@@ -740,16 +757,16 @@ async def handle_callbacks(callback: types.CallbackQuery):
 # ==================== HEALTH CHECK ====================
 from aiohttp import web
 
-app = web.Application()
+web_app = web.Application()
 
 async def health_check(request):
     return web.Response(text="Bot is running!", status=200)
 
-app.router.add_get('/', health_check)
-app.router.add_get('/health', health_check)
+web_app.router.add_get('/', health_check)
+web_app.router.add_get('/health', health_check)
 
 async def run_health_server():
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(web_app)
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
@@ -758,7 +775,7 @@ async def run_health_server():
 
 # ==================== MAIN ====================
 async def main():
-    print("🤖 @GroupHelpBot-Style Bot v2.0 Starting...")
+    print("🤖 Group Helper Bot v2.0 Starting...")
     print(f"📋 Features:")
     print(f"  • CAPTCHA: {'ON' if ENABLE_CAPTCHA else 'OFF'}")
     print(f"  • Anti-Spam: {'ON' if ENABLE_ANTI_SPAM else 'OFF'}")
@@ -767,7 +784,10 @@ async def main():
     print(f"  • Force Join: {'ON' if ENABLE_FORCE_JOIN else 'OFF'}")
     print(f"  • Log Channel: {'ON' if ENABLE_LOG_CHANNEL else 'OFF'}")
     
-    await run_health_server()
+    # Start health check server
+    asyncio.create_task(run_health_server())
+    
+    # Start polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
